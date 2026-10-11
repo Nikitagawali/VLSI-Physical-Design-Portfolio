@@ -1,45 +1,3 @@
-#set_pg_via_master_rule pgvia_8x10 -via_array_dimension {8 10}
-
-#set all_macros [get_cells -hierarchical -filter "is_hard_macro && !is_physical_only"]
-#set hm(risc_core) [get_cells -filter "is_hard_macro==true" -physical_context *REG_FILE_*_RAM*]
-#set hm(top) [remove_from_collection $all_macros $hm(risc_core)]
-
-
-#create_keepout_margin -outer {3 3 3 3}  $all_macros
-
-
-##################################################################################################
-#			creating ports
-##################################################################################################
-
-set_block_pin_constraint -self -allowed_layers {M3 M4 M5 M6}
-place_pins -self
-
-set_block_pin_constraints -self -allowed_layers {M3 M5}
-place_pins -ports [get_ports -filter "direction==in"]
-
-set_block_pin_constraints -self -allowed_layers {M4 M6}
-place_pins -ports [get_ports -filter "direction==out"]
-
-
-#################################################################################################
-#			creating Routing directions
-################################################################################################
-
-#get_site_defs
-#set_attribute [get_site_defs unit] symmetry y
-#set_attribute [get_site_defs unit] is_default true
-
-#set_attribute [get_layers {M2 M4 M6 M8}] routing_direction horizontal
-#set_attribute [get_layers {M1 M3 M5 M7 M9}] routing_direction vertical
-#get_attribute [get_layers M?] routing_direction
-
-#report_ignored_layers
-#set_ignored_layers -max_routing_layer M8
-#report_ignored_layers
-
-
-
 #####################################################################################################
 #		 creating rings 
 #####################################################################################################
@@ -52,49 +10,92 @@ remove_routes -net_types {power ground} -ring -stripe -macro_pin_connect -lib_ce
 
 connect_pg_net
 
-#create_pg_ring_pattern ring_pattern -horizontal_layer M7 -horizontal_width {1.5} \
-			     -horizontal_spacing {1} \
-			     -vertical_layer M8 -vertical_width {1.5} \
-			     -vertical_spacing {1}
-#set_pg_strategy core_ring   \
+create_pg_ring_pattern ring_pattern -horizontal_layer M5 -horizontal_width {2} \
+			     -horizontal_spacing {1.5} \
+			     -vertical_layer M6 -vertical_width {2} \
+			     -vertical_spacing {1.5} -corner_bridge true
+set_pg_strategy core_ring   \
 	 -pattern {{name: ring_pattern} \
-           {nets: {VDD VSS}} {offset: {1 1}}} -core \
-           -extension {{nets: VDD VSS} {direction: L} {side: 2} {stop: design_boundary_and_generate_pin}}
+           {nets: {VDD VSS}} {offset: {2 2}}} -core \
+           -extension {{{side:1} {nets: VDD} {direction: B} {stop: design_boundary_and_generate_pin}} \
+		{{side:2} {nets: VSS} {direction: L} {stop: design_boundary_and_generate_pin}}}
 
-#set_pg_strategy_via_rule rail_via_rule -via_rule \
+set_pg_strategy_via_rule rail_via_rule -via_rule \
                          {{intersection: adjacent} {via_master: default}}
 
 
-#compile_pg -strategies {core_ring} -via_rule rail_via_rule
+compile_pg -strategies {core_ring} -via_rule rail_via_rule
                 
 
-####################################################################################################
-#			creating rails
-####################################################################################################
-create_pg_std_cell_conn_pattern rail_pattern -layers M1 -rail_width {0.06 0.06}
-
-set_pg_strategy M1_rails -core \
-   -pattern {{name: rail_pattern}{nets: VDD VSS}}
-
-compile_pg -strategies M1_rails
 
 ####################################################################################################
 #			creating mesh
 ###################################################################################################
 
 create_pg_mesh_pattern mesh_pattern \
-   -layers {{{vertical_layer: M6} {width: 0.2}\
-             {pitch: 10} {offset: 5}{spacing: interleaving}}\
-            {{horizontal_layer: M5} {width: 0.3}\
-             {pitch: 10} {offset: 4.7} {spacing: interleaving}}}
+   -layers {{{vertical_layer: M6} {width: 0.26}\
+             {pitch: 12} {offset: 4}{spacing: interleaving}}\
+            {{horizontal_layer: M5} {width: 0.16}\
+             {pitch: 12} {offset: 4} {spacing: interleaving}}} -via_rule {{intersection: all} {via_master: default}}
 
 set_pg_strategy M5M6_mesh \
    -pattern {{name: mesh_pattern} \
-             {nets: VDD VSS}} -core -extension {{stop: outermost_ring}}
+             {nets: VDD VSS}} -core -extension {{stop:first_target}} 
+
 
 compile_pg -strategies M5M6_mesh
-                
+
+#####################################################################################
+#lower mesh
+###############################################################################################
+
+create_pg_mesh_pattern low_mesh_pattern \
+   -layer {{vertical_layer: M2} {width: 0.096}\
+             {pitch:15} {offset:5} {spacing:interleaving} {trim:true}}\
+   -via_rule {{intersection: all} {via_master: default}}
+
+set_pg_strategy M2_low_mesh \
+   -pattern {{name: low_mesh_pattern} \
+             {nets: VDD VSS}} -core -extension {{stop:outermost_ring}} 
+
+
+compile_pg -strategies M2_low_mesh
+
+             
+########################################################################################
+# macro ring for macros
+########################################################################################
+set macros [get_cells -hierarchical -physical_context -filter "is_hard_macro && !is_physical_only"]
+
+create_pg_ring_pattern P_HM_ring -horizontal_layer M7 -horizontal_width {1} -vertical_layer M8 -vertical_width {1} -corner_bridge false
+
+set_pg_strategy S_HM_ring_top -macros $macros -pattern { {pattern: P_HM_ring} {nets: {VSS VDD}} {offset: {0.3 0.3}} }
+
+set_pg_strategy_via_rule S_ring_vias -via_rule { {{{strategies: {S_HM_ring_top}} {layers: {M7}}} {existing: {strap}}{via_master:{default}}} {{{strategies:{S_HM_ring_top}} {layers: {M8}}} {existing:{strap}}{via_master: {default}}} }
+
+compile_pg -strategies {S_HM_ring_top} -via_rule S_ring_vias
+
+create_pg_macro_conn_pattern macro_connect_pattern -pin_conn_type scattered_pin -layers {M7 M8}
+
+set_pg_strategy macro_connect -pattern {{name: macro_connect_pattern} {nets: VSS VDD}} -macros "$macros"
+
+compile_pg -strategies macro_connect
+ 
+
+#############################################################################################
+# creating rails
+#########################################################################################
+
+create_pg_std_cell_conn_pattern rail_pattern -layers M1
+
+set_pg_strategy m1_rails -pattern {{name: rail_pattern} {nets:VDD VSS}} -core -blockage {{macros_with_keepout:ALU CSRF/MC}}
+
+compile_pg -strategies m1_rails
+
+#######################################################################################
+# checks
+##########################################################################################
 
 check_pg_connectivity
 check_pg_missing_vias
-check_pg_drc 
+check_pg_drc
